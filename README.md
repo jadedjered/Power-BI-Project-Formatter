@@ -1,4 +1,4 @@
-# Power-BI-Project-Formatter
+# Power BI Project Formatter
 
 This application is an automated tool to convert Microsoft Power BI PBIX files into PBIP project files. PBIP (Power BI Project) format stores reports and semantic models as human-readable files suitable for version control.
 
