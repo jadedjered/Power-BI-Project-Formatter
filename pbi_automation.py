@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 
 import psutil
 import pyautogui
+import pyperclip
 from pywinauto import Application, Desktop
 from pywinauto.findwindows import ElementNotFoundError
 from pywinauto.timings import TimeoutError as PywinautoTimeoutError
@@ -161,6 +162,72 @@ def wait_for_pbi_ready(filename: str, timeout: int = STARTUP_TIMEOUT) -> Applica
     )
 
 
+def type_text_via_clipboard(text: str) -> None:
+    """
+    Type text by copying to clipboard and pasting.
+    This handles special characters and paths correctly.
+
+    Args:
+        text: The text to type.
+    """
+    old_clipboard = None
+    try:
+        old_clipboard = pyperclip.paste()
+    except Exception:
+        pass
+
+    pyperclip.copy(text)
+    time.sleep(0.1)
+    pyautogui.hotkey('ctrl', 'v')
+    time.sleep(0.3)
+
+    # Restore old clipboard content
+    if old_clipboard is not None:
+        try:
+            pyperclip.copy(old_clipboard)
+        except Exception:
+            pass
+
+
+def wait_for_save_dialog(timeout: int = DIALOG_TIMEOUT) -> bool:
+    """
+    Wait for a Save As dialog to appear.
+
+    Args:
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        True if dialog found, False otherwise.
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            desktop = Desktop(backend='uia')
+            # Look for common Save dialog titles
+            for title_pattern in ["Save As", "Save as", "Save"]:
+                try:
+                    dialog = desktop.window(title=title_pattern)
+                    if dialog.exists() and dialog.is_visible():
+                        return True
+                except ElementNotFoundError:
+                    pass
+
+            # Also try regex pattern
+            try:
+                dialog = desktop.window(title_re=".*Save.*")
+                if dialog.exists() and dialog.is_visible():
+                    return True
+            except ElementNotFoundError:
+                pass
+
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+
+    return False
+
+
 def save_as_pbip(app: Application, output_folder: str, project_name: str) -> Tuple[bool, str]:
     """
     Automate the Save As dialog to save current file as PBIP.
@@ -174,101 +241,131 @@ def save_as_pbip(app: Application, output_folder: str, project_name: str) -> Tup
         Tuple of (success: bool, message: str).
     """
     try:
-        # Get the main window
+        # Get the main window and ensure it has focus
         main_window = app.top_window()
         main_window.set_focus()
-        time.sleep(0.5)
-
-        # Open File menu using keyboard shortcut
-        pyautogui.hotkey('alt', 'f')
         time.sleep(1)
 
-        # Navigate to "Save as" - it's typically accessed via the File menu
-        # In Power BI Desktop, we need to click "Save as" or use keyboard
-        pyautogui.press('a')  # 'a' for Save As in many versions
-        time.sleep(1)
+        # Try Ctrl+Shift+S first (standard Save As shortcut)
+        print("    Attempting Save As with Ctrl+Shift+S...")
+        pyautogui.hotkey('ctrl', 'shift', 's')
+        time.sleep(2)
 
-        # If that didn't work, try clicking directly or using arrow keys
-        # Try pressing down arrow to navigate menu and enter
-        pyautogui.press('down')
-        pyautogui.press('down')
-        pyautogui.press('down')  # Navigate past Save to Save As
-        time.sleep(0.3)
-        pyautogui.press('enter')
-        time.sleep(1.5)
-
-        # Wait for Save As dialog to appear
-        save_dialog = None
-        for _ in range(DIALOG_TIMEOUT):
-            try:
-                # Try to find the Save As dialog
-                save_dialog = app.window(title_re=".*Save.*", control_type="Window")
-                if save_dialog.exists():
-                    break
-            except ElementNotFoundError:
-                pass
-
-            # Also check for a file dialog
-            try:
-                desktop = Desktop(backend='uia')
-                save_dialog = desktop.window(title_re=".*Save.*")
-                if save_dialog.exists():
-                    break
-            except ElementNotFoundError:
-                pass
-
-            time.sleep(1)
-
-        if not save_dialog or not save_dialog.exists():
-            # Fallback: try keyboard shortcut for Save As
+        # Check if Save As dialog appeared
+        if not wait_for_save_dialog(timeout=5):
+            # Fallback: Try File menu approach
+            print("    Ctrl+Shift+S didn't work, trying File menu...")
             main_window.set_focus()
-            pyautogui.hotkey('ctrl', 'shift', 's')
+            time.sleep(0.5)
+
+            # Open File menu
+            pyautogui.hotkey('alt', 'f')
+            time.sleep(1.5)
+
+            # In Power BI, Save As is typically the 'a' accelerator key
+            pyautogui.press('a')
             time.sleep(2)
+
+            # If still no dialog, try navigating with arrows
+            if not wait_for_save_dialog(timeout=3):
+                print("    Trying arrow key navigation...")
+                main_window.set_focus()
+                pyautogui.hotkey('alt', 'f')
+                time.sleep(1)
+
+                # Navigate down to Save As option
+                for _ in range(5):
+                    pyautogui.press('down')
+                    time.sleep(0.2)
+                pyautogui.press('enter')
+                time.sleep(2)
+
+        # Final check for Save dialog
+        if not wait_for_save_dialog(timeout=5):
+            return False, "Could not open Save As dialog"
+
+        print("    Save As dialog opened, entering file details...")
 
         # Prepare the output path
         output_path = os.path.join(os.path.abspath(output_folder), project_name)
 
-        # Type the file path in the filename field
-        # First, try to find and clear the filename field
-        time.sleep(1)
-
-        # Use keyboard to navigate - Ctrl+L or Tab to filename field, then type path
-        pyautogui.hotkey('alt', 'n')  # Common shortcut for filename field
+        # Focus on filename field - try multiple methods
         time.sleep(0.5)
 
-        # Clear existing text and type new path
+        # Method 1: Alt+N (common shortcut for filename field)
+        pyautogui.hotkey('alt', 'n')
+        time.sleep(0.3)
+
+        # Select all existing text and replace with our path
         pyautogui.hotkey('ctrl', 'a')
         time.sleep(0.2)
-        pyautogui.typewrite(output_path, interval=0.02)
+
+        # Use clipboard to paste the path (handles special characters)
+        type_text_via_clipboard(output_path)
         time.sleep(0.5)
 
-        # Now change the file type to PBIP
-        # Tab to file type dropdown or use Alt+T
-        pyautogui.hotkey('alt', 't')  # File type dropdown
+        # Change file type to PBIP
+        print("    Selecting PBIP file type...")
+
+        # Try Alt+T for file type dropdown
+        pyautogui.hotkey('alt', 't')
         time.sleep(0.5)
 
-        # Type to search for PBIP in dropdown
-        pyautogui.typewrite('pbip', interval=0.05)
-        time.sleep(0.5)
+        # Navigate dropdown - press Home to go to top, then find PBIP
+        pyautogui.press('home')
+        time.sleep(0.2)
+
+        # Arrow down to find PBIP option (it's usually near the bottom)
+        # Power BI typically has: PBIX, PBIT, PBIP
+        for _ in range(5):
+            pyautogui.press('down')
+            time.sleep(0.2)
+
+        # Or try typing 'p' multiple times to cycle through P options
+        pyautogui.press('p')
+        time.sleep(0.2)
+        pyautogui.press('p')
+        time.sleep(0.2)
+        pyautogui.press('p')
+        time.sleep(0.3)
+
         pyautogui.press('enter')
         time.sleep(0.5)
 
         # Click Save button
-        pyautogui.hotkey('alt', 's')  # Save button
-        time.sleep(SAVE_TIMEOUT)
+        print("    Clicking Save...")
+        pyautogui.hotkey('alt', 's')
+        time.sleep(3)
 
-        # Verify the output was created
+        # Wait for save operation to complete
+        print("    Waiting for save to complete...")
+        save_start = time.time()
+        while time.time() - save_start < SAVE_TIMEOUT:
+            # Check if the PBIP file or folders exist
+            pbip_file = os.path.join(output_folder, f"{project_name}.pbip")
+            report_folder = os.path.join(output_folder, f"{project_name}.Report")
+            model_folder = os.path.join(output_folder, f"{project_name}.SemanticModel")
+
+            if os.path.exists(pbip_file):
+                return True, f"Successfully saved to {output_folder}"
+            if os.path.exists(report_folder) or os.path.exists(model_folder):
+                # Give a bit more time for all files to be written
+                time.sleep(2)
+                return True, f"Successfully saved to {output_folder}"
+
+            time.sleep(1)
+
+        # Final verification
         pbip_file = os.path.join(output_folder, f"{project_name}.pbip")
         if os.path.exists(pbip_file):
             return True, f"Successfully saved to {output_folder}"
-        else:
-            # Check if the folder structure was created
-            report_folder = os.path.join(output_folder, f"{project_name}.Report")
-            model_folder = os.path.join(output_folder, f"{project_name}.SemanticModel")
-            if os.path.exists(report_folder) or os.path.exists(model_folder):
-                return True, f"Successfully saved to {output_folder}"
 
-            return False, "Save operation may have failed - output files not found"
+        report_folder = os.path.join(output_folder, f"{project_name}.Report")
+        model_folder = os.path.join(output_folder, f"{project_name}.SemanticModel")
+        if os.path.exists(report_folder) or os.path.exists(model_folder):
+            return True, f"Successfully saved to {output_folder}"
+
+        return False, "Save operation may have failed - output files not found"
 
     except Exception as e:
         return False, f"Error during save operation: {str(e)}"
